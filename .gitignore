@@ -1,9 +1,12 @@
+.env
 venv/
 .venv/
 __pycache__/
 *.pyc
-.env
 .ipynb_checkpoints/
-artifacts/raw_data/
-models/*.pkl
+artifacts/
+models/
 mlruns/
+
+# Trained model files
+*.pkl
