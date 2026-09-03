@@ -18,9 +18,15 @@ class DataTransformation:
     """
     Handles feature engineering and preprocessing for the
     retail demand prediction dataset.
+
+    Important:
+    Price and discount quantile boundaries are learned ONLY
+    from the training data and persisted for inference-time
+    consistency.
     """
 
     def __init__(self):
+
         self.input_data_path = os.path.join(
             "artifacts",
             "ingested_data",
@@ -37,13 +43,23 @@ class DataTransformation:
             "preprocessor.pkl"
         )
 
+        self.feature_config_path = os.path.join(
+            self.processed_directory,
+            "feature_config.pkl"
+        )
+
     def _feature_engineering(self, dataframe):
         """
-        Apply the feature engineering logic established
-        during notebook experimentation.
+        Apply feature engineering that does not require
+        data-dependent quantile boundaries.
+
+        Price and discount level features are intentionally
+        created separately after the train/test split.
         """
 
-        logger.info("Starting feature engineering.")
+        logger.info(
+            "Starting basic feature engineering."
+        )
 
         dataframe = dataframe.copy()
 
@@ -63,7 +79,6 @@ class DataTransformation:
                 f"Found {invalid_dates} invalid date values."
             )
 
-        # Sort chronologically
         dataframe = dataframe.sort_values(
             "date"
         ).reset_index(drop=True)
@@ -80,7 +95,7 @@ class DataTransformation:
             )
 
         # --------------------------------------------------
-        # Remove potential leakage columns
+        # Leakage columns
         # --------------------------------------------------
 
         leakage_columns = [
@@ -99,7 +114,7 @@ class DataTransformation:
         )
 
         # --------------------------------------------------
-        # Date Features
+        # Date features
         # --------------------------------------------------
 
         dataframe["year"] = (
@@ -130,7 +145,7 @@ class DataTransformation:
         )
 
         # --------------------------------------------------
-        # Cyclical Time Features
+        # Cyclical time features
         # --------------------------------------------------
 
         dataframe["month_sin"] = np.sin(
@@ -150,7 +165,7 @@ class DataTransformation:
         )
 
         # --------------------------------------------------
-        # Competitive Pricing Features
+        # Competitive pricing features
         # --------------------------------------------------
 
         if "competitor_pricing" in dataframe.columns:
@@ -173,36 +188,13 @@ class DataTransformation:
                 / dataframe["competitor_pricing"]
             )
 
-            # Remove redundant raw competitor pricing
             dataframe = dataframe.drop(
                 columns=["competitor_pricing"],
                 errors="ignore"
             )
 
         # --------------------------------------------------
-        # Pricing Level Features
-        # --------------------------------------------------
-
-        dataframe["price_level"] = pd.qcut(
-            dataframe["price"],
-            q=3,
-            labels=["Low", "Medium", "High"],
-            duplicates="drop"
-        )
-
-        # --------------------------------------------------
-        # Discount Level Features
-        # --------------------------------------------------
-
-        dataframe["discount_level"] = pd.qcut(
-            dataframe["discount"],
-            q=3,
-            labels=["Low", "Medium", "High"],
-            duplicates="drop"
-        )
-
-        # --------------------------------------------------
-        # Promotion + Discount
+        # Promotion + discount
         # --------------------------------------------------
 
         dataframe["promotion_discount"] = (
@@ -211,7 +203,7 @@ class DataTransformation:
         )
 
         # --------------------------------------------------
-        # Price + Promotion
+        # Price + promotion
         # --------------------------------------------------
 
         dataframe["price_promotion"] = (
@@ -220,7 +212,7 @@ class DataTransformation:
         )
 
         # --------------------------------------------------
-        # Price + Discount
+        # Price + discount
         # --------------------------------------------------
 
         dataframe["price_discount"] = (
@@ -229,7 +221,7 @@ class DataTransformation:
         )
 
         # --------------------------------------------------
-        # Category + Seasonality
+        # Category + seasonality
         # --------------------------------------------------
 
         dataframe["category_seasonality"] = (
@@ -239,17 +231,7 @@ class DataTransformation:
         )
 
         # --------------------------------------------------
-        # Category + Price Level
-        # --------------------------------------------------
-
-        dataframe["category_price_level"] = (
-            dataframe["category"].astype(str)
-            + "_"
-            + dataframe["price_level"].astype(str)
-        )
-
-        # --------------------------------------------------
-        # Inventory Transformation
+        # Inventory transformation
         # --------------------------------------------------
 
         dataframe["inventory_log"] = np.log1p(
@@ -257,15 +239,139 @@ class DataTransformation:
         )
 
         logger.info(
-            f"Feature engineering completed. "
+            f"Basic feature engineering completed. "
             f"Shape: {dataframe.shape}"
+        )
+
+        return dataframe
+
+    @staticmethod
+    def _calculate_quantile_bins(series):
+        """
+        Calculate training-data quantile boundaries.
+
+        Returns:
+            List containing:
+            [minimum, Q1, Q2, maximum]
+        """
+
+        series = pd.to_numeric(
+            series,
+            errors="coerce"
+        ).dropna()
+
+        if series.empty:
+            raise ValueError(
+                "Cannot calculate quantile bins from empty data."
+            )
+
+        quantiles = series.quantile(
+            [0, 1 / 3, 2 / 3, 1]
+        ).values
+
+        quantiles = np.asarray(
+            quantiles,
+            dtype=float
+        )
+
+        # Remove duplicate boundaries
+        quantiles = np.unique(
+            quantiles
+        )
+
+        if len(quantiles) < 2:
+            raise ValueError(
+                "Insufficient unique values to create "
+                "price/discount levels."
+            )
+
+        return quantiles.tolist()
+
+    @staticmethod
+    def _apply_quantile_bins(
+        series,
+        bins,
+        feature_name
+    ):
+        """
+        Apply previously learned training quantile bins.
+        """
+
+        bins = np.asarray(
+            bins,
+            dtype=float
+        )
+
+        if len(bins) < 2:
+            raise ValueError(
+                f"Invalid bins for {feature_name}."
+            )
+
+        # If duplicate boundaries exist, create only as many
+        # categories as the available intervals support.
+        interval_count = len(bins) - 1
+
+        labels = [
+            "Low",
+            "Medium",
+            "High"
+        ][:interval_count]
+
+        result = pd.cut(
+            pd.to_numeric(
+                series,
+                errors="coerce"
+            ),
+            bins=bins,
+            labels=labels,
+            include_lowest=True
+        )
+
+        return result.astype(object).where(
+            result.notna(),
+            other="Medium"
+        )
+
+    def _add_price_discount_levels(
+        self,
+        dataframe,
+        feature_config
+    ):
+        """
+        Add price_level, discount_level and
+        category_price_level using persisted training
+        boundaries.
+        """
+
+        dataframe = dataframe.copy()
+
+        dataframe["price_level"] = (
+            self._apply_quantile_bins(
+                dataframe["price"],
+                feature_config["price_bins"],
+                "price"
+            )
+        )
+
+        dataframe["discount_level"] = (
+            self._apply_quantile_bins(
+                dataframe["discount"],
+                feature_config["discount_bins"],
+                "discount"
+            )
+        )
+
+        dataframe["category_price_level"] = (
+            dataframe["category"].astype(str)
+            + "_"
+            + dataframe["price_level"].astype(str)
         )
 
         return dataframe
 
     def _build_preprocessor(self, X_train):
         """
-        Build the numerical and categorical preprocessing
+        Build numerical and categorical preprocessing
         pipelines.
         """
 
@@ -342,10 +448,6 @@ class DataTransformation:
         return preprocessor
 
     def initiate_data_transformation(self):
-        """
-        Perform feature engineering, chronological train/test
-        split, preprocessing and artifact creation.
-        """
 
         logger.info(
             "Starting data transformation."
@@ -354,7 +456,7 @@ class DataTransformation:
         try:
 
             # --------------------------------------------------
-            # Load Phase 4 ingestion artifact
+            # Load ingestion artifact
             # --------------------------------------------------
 
             if not os.path.exists(
@@ -375,7 +477,7 @@ class DataTransformation:
             )
 
             # --------------------------------------------------
-            # Feature Engineering
+            # Basic feature engineering
             # --------------------------------------------------
 
             dataframe = self._feature_engineering(
@@ -383,7 +485,7 @@ class DataTransformation:
             )
 
             # --------------------------------------------------
-            # Chronological Train/Test Split
+            # Chronological train/test split
             # --------------------------------------------------
 
             dataframe = dataframe.sort_values(
@@ -425,6 +527,49 @@ class DataTransformation:
             )
 
             # --------------------------------------------------
+            # Learn quantile boundaries ONLY from training data
+            # --------------------------------------------------
+
+            feature_config = {
+
+                "price_bins": (
+                    self._calculate_quantile_bins(
+                        train_df["price"]
+                    )
+                ),
+
+                "discount_bins": (
+                    self._calculate_quantile_bins(
+                        train_df["discount"]
+                    )
+                )
+            }
+
+            logger.info(
+                f"Price bins: "
+                f"{feature_config['price_bins']}"
+            )
+
+            logger.info(
+                f"Discount bins: "
+                f"{feature_config['discount_bins']}"
+            )
+
+            # --------------------------------------------------
+            # Apply same bins to train and test
+            # --------------------------------------------------
+
+            train_df = self._add_price_discount_levels(
+                train_df,
+                feature_config
+            )
+
+            test_df = self._add_price_discount_levels(
+                test_df,
+                feature_config
+            )
+
+            # --------------------------------------------------
             # Separate X and y
             # --------------------------------------------------
 
@@ -455,7 +600,7 @@ class DataTransformation:
             )
 
             # --------------------------------------------------
-            # Build Preprocessor
+            # Build preprocessor
             # --------------------------------------------------
 
             preprocessor = self._build_preprocessor(
@@ -479,7 +624,7 @@ class DataTransformation:
             )
 
             # --------------------------------------------------
-            # Feature Names
+            # Feature names
             # --------------------------------------------------
 
             feature_names = (
@@ -568,8 +713,23 @@ class DataTransformation:
                 self.preprocessor_path
             )
 
+            # --------------------------------------------------
+            # Save feature configuration
+            # --------------------------------------------------
+
+            joblib.dump(
+                feature_config,
+                self.feature_config_path
+            )
+
             logger.info(
-                "Preprocessor saved successfully."
+                f"Preprocessor saved at: "
+                f"{self.preprocessor_path}"
+            )
+
+            logger.info(
+                f"Feature configuration saved at: "
+                f"{self.feature_config_path}"
             )
 
             logger.info(
@@ -581,7 +741,8 @@ class DataTransformation:
                 X_test_path,
                 y_train_path,
                 y_test_path,
-                self.preprocessor_path
+                self.preprocessor_path,
+                self.feature_config_path
             )
 
         except Exception as error:
@@ -605,9 +766,13 @@ if __name__ == "__main__":
         .initiate_data_transformation()
     )
 
-    print("\nData transformation completed.")
+    print(
+        "\nData transformation completed."
+    )
 
-    print("\nGenerated files:")
+    print(
+        "\nGenerated files:"
+    )
 
     for path in result:
         print(path)
