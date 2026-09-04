@@ -323,9 +323,30 @@ class PredictPipeline:
 
         if "competitor_pricing" in dataframe.columns:
 
+            # Keep the original competitor_pricing feature.
+            # It is a valid numeric model feature and is
+            # required by the feature-engineering tests.
+
+            dataframe["competitor_pricing"] = pd.to_numeric(
+                dataframe["competitor_pricing"],
+                errors="coerce"
+            )
+
+            if dataframe["competitor_pricing"].isna().any():
+                raise ValueError(
+                    "Invalid competitor_pricing supplied "
+                    "for prediction."
+                )
+
             competitor_price = (
                 dataframe["competitor_pricing"]
             )
+
+            # Avoid division by zero.
+            if (competitor_price <= 0).any():
+                raise ValueError(
+                    "competitor_pricing must be greater than zero."
+                )
 
             dataframe["price_difference"] = (
                 dataframe["price"]
@@ -345,17 +366,13 @@ class PredictPipeline:
                 / competitor_price
             )
 
-            dataframe = dataframe.drop(
-                columns=["competitor_pricing"],
-                errors="ignore"
-            )
-
         else:
 
             raise ValueError(
                 "competitor_pricing is required "
                 "for prediction."
             )
+        
 
         # --------------------------------------------------
         # Price level
@@ -423,6 +440,23 @@ class PredictPipeline:
         # --------------------------------------------------
         # Inventory transformation
         # --------------------------------------------------
+
+        numeric_columns = [
+            "inventory_level",
+            "price",
+            "discount",
+            "promotion",
+            "competitor_pricing",
+            "epidemic"
+        ]
+
+        for column in numeric_columns:
+            if column in dataframe.columns:
+                dataframe[column] = pd.to_numeric(
+                    dataframe[column],
+                    errors="coerce"
+                )
+
 
         dataframe["inventory_log"] = np.log1p(
             dataframe["inventory_level"]
