@@ -23,24 +23,36 @@ class PredictPipeline:
     """
 
     def __init__(self):
+        # Get the project root directory
+        project_root = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                ".."
+            )
+        )
 
         self.preprocessor_path = os.path.join(
+            project_root,
             "artifacts",
             "processed",
             "preprocessor.pkl"
         )
 
         self.feature_config_path = os.path.join(
+            project_root,
             "artifacts",
             "processed",
             "feature_config.pkl"
         )
 
         self.model_path = os.path.join(
+            project_root,
             "models",
             "final_demand_model.pkl"
         )
 
+    
     def _load_artifacts(self):
 
         logger.info(
